@@ -11,6 +11,7 @@ Phases done here: 2c (object data merge) + 2d (constants). TODO: 2a script splic
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import shutil
 import subprocess
@@ -376,10 +377,49 @@ def convert(vanilla_path: str, out_path: str,
     return out_path
 
 
+def _archon_out_name(src_path: str) -> str:
+    """<name>_archon<ext> for a source map (preserves the .w3x/.w3m extension)."""
+    name, ext = os.path.splitext(os.path.basename(src_path))
+    return name + "_archon" + ext
+
+
+def convert_batch(src_dir: str, out_dir: str, hide_support_score: bool = True,
+                  match_support_color: bool = True, pre_game_timer: int = 0):
+    """Convert every melee map in src_dir into out_dir. Safe by design: the source folder is only
+    READ, outputs go to a separate folder, an output that already exists is SKIPPED (never
+    overwritten), and one map's failure doesn't stop the rest."""
+    found = sorted(set(glob.glob(os.path.join(src_dir, "*.w3x")) + glob.glob(os.path.join(src_dir, "*.w3m"))))
+    found = [m for m in found if not os.path.splitext(os.path.basename(m))[0].endswith("_archon")]
+    if not found:
+        print("No .w3x/.w3m maps found in:", src_dir)
+        return {"ok": [], "skipped": [], "failed": []}
+    ok, skipped, failed = [], [], []
+    for m in found:
+        base = os.path.basename(m)
+        out_path = os.path.join(out_dir, _archon_out_name(m))
+        if os.path.exists(out_path):
+            print("  SKIP (already exists):", base)
+            skipped.append(base)
+            continue
+        print("  converting:", base)
+        try:
+            convert(m, out_path, hide_support_score=hide_support_score,
+                    match_support_color=match_support_color, pre_game_timer=pre_game_timer)
+            ok.append(base)
+        except Exception as e:  # noqa: BLE001 — keep going; report failures at the end
+            print("  FAILED:", base, "->", e)
+            failed.append((base, str(e)))
+    print("\nBatch done: %d converted, %d skipped, %d failed (of %d found)."
+          % (len(ok), len(skipped), len(failed), len(found)))
+    for base, e in failed:
+        print("  - FAILED:", base, "->", e)
+    return {"ok": ok, "skipped": skipped, "failed": failed}
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Convert a vanilla melee .w3x into an Archon map.")
-    ap.add_argument("src", help="vanilla melee map (.w3x)")
-    ap.add_argument("out_dir", help="folder to write the converted map into (named <src-name>_archon.w3x)")
+    ap.add_argument("src", help="vanilla melee map (.w3x), or a FOLDER of maps with --batch")
+    ap.add_argument("out_dir", help="folder to write the converted map(s) into (named <name>_archon.w3x)")
     ap.add_argument("--show-support-score", action="store_true",
                     help="keep support players on the post-game score screen "
                          "(default: hidden, since their only score is dummy-unit noise)")
@@ -389,11 +429,14 @@ if __name__ == "__main__":
     ap.add_argument("--pre-game-timer", type=int, default=0, metavar="SECONDS",
                     help="freeze units for SECONDS at game start (countdown shown) so queue partners "
                          "can chat-coordinate; default 0 = off")
+    ap.add_argument("--batch", action="store_true",
+                    help="treat <src> as a FOLDER and convert every melee map in it")
     args = ap.parse_args()
-    stem = os.path.splitext(os.path.basename(args.src))[0]
-    out_path = os.path.join(args.out_dir, stem + "_archon.w3x")
-    out = convert(args.src, out_path,
-                  hide_support_score=not args.show_support_score,
-                  match_support_color=not args.keep_support_color,
-                  pre_game_timer=args.pre_game_timer)
-    print("converted ->", out)
+    opts = dict(hide_support_score=not args.show_support_score,
+                match_support_color=not args.keep_support_color,
+                pre_game_timer=args.pre_game_timer)
+    if args.batch or os.path.isdir(args.src):
+        convert_batch(args.src, args.out_dir, **opts)
+    else:
+        out_path = os.path.join(args.out_dir, _archon_out_name(args.src))
+        print("converted ->", convert(args.src, out_path, **opts))
