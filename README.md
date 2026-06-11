@@ -42,6 +42,8 @@ Host the converted `.w3x` as a normal custom game. The lobby shows **two teams o
 
 ## Map compatibility
 
+**The base map must be a standard 1v1 or 2v2 melee map** — two teams, **up to 4 starting players**. Archon mode turns each side into a *main + support* pair and produces a two-team game, so anything with more players or more than two teams (**3v3, 4v4, FFA**) is out of scope: it will still *convert* and produce a file, but the result won't play correctly. (A 6-player 3v3 map, for example, converts without error but doesn't work in-game.) Stick to 2-player (1v1) and 4-player (2v2) melee maps.
+
 - **Unmodified (vanilla) melee maps — fully supported.** That's the primary target.
 - **Modified maps — it depends what they change.** The deployer is *additive* wherever possible: it
   appends its units to the map's object data and *merges* (never overwrites) the gameplay constants,
