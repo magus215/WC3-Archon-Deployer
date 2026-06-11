@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# Local test output (converted maps, scratch)
+*_archon.w3x
+_*.w3x
+_*.txt

@@ -1,0 +1,28 @@
+WC3 Archon Deployer — components & licensing
+============================================
+
+This project combines several parts under different licenses. They are
+separate works distributed together (aggregation); each keeps its own terms.
+
+1. Deployer tooling  — MIT License (see LICENSE)
+   src/, gui.py, jass/core.j, jass/tavern.j, helpers/archon_objdata.w3o
+   Copyright (c) 2026 magus215.
+
+2. Warcraft III content — Blizzard Custom Game Acceptable Use Policy
+   The JASS spliced into maps, the dummy object data, and any maps produced by
+   this tool are Warcraft III custom content and are governed by Blizzard
+   Entertainment's policy:
+   https://www.blizzard.com/en-us/legal/2749df07-2b53-4990-b75e-a7cb3610318b/custom-game-acceptable-use-policy
+
+3. MPQEditor.exe — GNU General Public License v2 (see LICENSE-MPQEditor.txt)
+   tools/MPQEditor.exe — Copyright (c) Ladislav Zezula.
+   Bundled unmodified and invoked only as a separate program via its command
+   line (mere aggregation, GPLv2 §2), so it does not place the GPL on this
+   project's own MIT-licensed code. As required by GPLv2, its source is
+   available from:
+   https://github.com/OMGhixD-OG/Ladiks-MPQ-Editor
+
+Note: the optional JASS compile-check uses pjass plus Blizzard's common.j /
+Blizzard.j. Those are NOT bundled (common.j/Blizzard.j are Blizzard's files);
+the deployer simply skips the check when they are absent. Advanced users can
+drop pjass + common.j/Blizzard.j into tools/ to enable it.
