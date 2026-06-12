@@ -1,0 +1,12 @@
+# GitHub Linguist mis-detects JASS (.j) as Objective-J, and has no JASS language to
+# relabel it to, so keep .j out of the repo language bar rather than show a wrong one.
+*.j linguist-detectable=false
+
+# Binary assets — never apply text / line-ending conversion (it would corrupt them).
+*.exe binary
+*.w3o binary
+*.w3x binary
+*.w3m binary
+*.blp binary
+*.mdx binary
+*.tga binary
