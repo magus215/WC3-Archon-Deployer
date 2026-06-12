@@ -324,11 +324,17 @@ def splice_lua(map_lua: str, core_lua: str, tavern_lua: str,
 
 
 def _mpq(args):
-    """Run an MPQEditor console command, waiting for completion. errorlevel 0 = ok, 5 = perms."""
-    r = subprocess.run([os.path.abspath(MPQEDITOR)] + args, capture_output=True, text=True)
-    if r.returncode not in (0,):
-        raise RuntimeError(f"MPQEditor {args[0]} failed (exit {r.returncode})")
-    return r
+    """Run an MPQEditor console command, waiting for completion. Retries a few times with a short
+    backoff: a freshly written .w3x can be briefly locked by antivirus / OneDrive / a running WC3."""
+    import time
+    last = 0
+    for attempt in range(3):
+        r = subprocess.run([os.path.abspath(MPQEDITOR)] + args, capture_output=True, text=True)
+        if r.returncode == 0:
+            return r
+        last = r.returncode
+        time.sleep(0.3 * (attempt + 1))
+    raise RuntimeError(f"MPQEditor {args[0]} failed (exit {last})")
 
 
 def mpq_add(archive: str, local_file: str, internal_path: str):
@@ -337,6 +343,52 @@ def mpq_add(archive: str, local_file: str, internal_path: str):
 
 def mpq_flush(archive: str):
     _mpq(["f", os.path.abspath(archive)])
+
+
+def _mpq_free_slots(archive: str):
+    """(mpq_signature_offset, free_hash_slots) for a .w3x/.w3m. free ~= hashTableSize - blockTableSize.
+    MPQ v1 maps (Blizzard's stock melee maps out of CASC) have a fixed ~32-slot table StormLib can't
+    grow in place, so a near-full one can't accept the files we add."""
+    import struct
+    d = open(archive, "rb").read(16384)
+    i = d.find(b"MPQ\x1a")
+    if i < 0:
+        return (-1, 9999)   # unrecognized; let the normal path try
+    ht = struct.unpack_from("<I", d, i + 0x18)[0]
+    bt = struct.unpack_from("<I", d, i + 0x1C)[0]
+    return (i, ht - bt)
+
+
+def _rebuild_with_room(archive: str, maxfiles: int = 256):
+    """Repack the archive into a fresh MPQ with a big hash table so our added files fit. We extract
+    EVERY file and re-add into a roomy archive — nothing real is deleted — and preserve the WC3 map
+    header if present. The MPQ '(...)' specials are skipped on re-add: MPQEditor regenerates
+    (listfile)/(attributes), and (signature) is intentionally dropped — our edits invalidate it and
+    it must not falsely mark the result as an official Blizzard ladder map."""
+    sig_off, _free = _mpq_free_slots(archive)
+    header = open(archive, "rb").read(sig_off) if sig_off > 0 else b""
+    exdir = tempfile.mkdtemp()
+    rebuilt = archive + ".rebuild"
+    try:
+        _mpq(["e", os.path.abspath(archive), "*", os.path.abspath(exdir), "/fp"])
+        if os.path.exists(rebuilt):
+            os.remove(rebuilt)
+        _mpq(["n", os.path.abspath(rebuilt), str(maxfiles)])
+        for root, _dirs, names in os.walk(exdir):
+            for nm in names:
+                full = os.path.join(root, nm)
+                rel = os.path.relpath(full, exdir).replace("/", "\\")
+                if rel.startswith("("):   # (listfile)/(attributes)/(signature): managed/dropped
+                    continue
+                _mpq(["a", os.path.abspath(rebuilt), full, rel])
+        _mpq(["f", os.path.abspath(rebuilt)])
+        with open(archive, "wb") as out:  # reassemble: original WC3 header (if any) + the roomy MPQ
+            out.write(header)
+            out.write(open(rebuilt, "rb").read())
+    finally:
+        shutil.rmtree(exdir, ignore_errors=True)
+        if os.path.exists(rebuilt):
+            os.remove(rebuilt)
 
 
 def _merged_w3u(src: "mpq.MPQArchive") -> bytes:
@@ -363,6 +415,12 @@ def convert(vanilla_path: str, out_path: str,
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     shutil.copyfile(vanilla_path, out_path)
     src = mpq.MPQArchive(vanilla_path)
+    # Stock Blizzard melee maps (straight from CASC) have a near-full MPQ hash table (~32 slots, no
+    # room for the files we add) AND carry an official-ladder (signature) our edits invalidate.
+    # Rebuild with a roomy table in those cases — it makes room AND drops the stale signature so the
+    # map isn't misrepresented as an official ladder map, while keeping every real file intact.
+    if _mpq_free_slots(out_path)[1] < 8 or src.has_file("(signature)"):
+        _rebuild_with_room(out_path)
 
     with tempfile.TemporaryDirectory() as td:
         w3u_path = os.path.join(td, "war3map.w3u")
