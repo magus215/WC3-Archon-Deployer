@@ -61,6 +61,12 @@ What can make a modified map incompatible:
   may not find its anchors — in which case the tool errors out during conversion rather than shipping
   a broken map.
 
+## Troubleshooting
+
+- **Double-clicking `run_gui.bat` flashes a window / says Python isn't found.** Install **Python 3.8+** from [python.org](https://www.python.org/downloads/) and, on the installer's first screen, tick **"Add Python to PATH"**. Then run it again. (The GUI needs nothing else — `tkinter` ships with Python.)
+- **Conversion fails at the repack step, or `MPQEditor.exe` is missing/blocked.** If you got the repo as a **ZIP download**, Windows tags the bundled `MPQEditor.exe` as "from the internet" and Defender/SmartScreen may block it. Either **`git clone`** the repo instead of downloading the ZIP, or right-click **`tools\MPQEditor.exe` → Properties → Unblock**.
+- **The tool errors out, or the converted map won't play.** It's almost always a compatibility issue — see [Map compatibility](#map-compatibility): the map is larger than 2v2 (3v3/4v4/FFA), uses an `ar`/`Ar` rawcode the tool also uses, or has a heavily rewritten script. The deployer errors out rather than shipping a broken map, so a failed conversion is the tool protecting you.
+
 ## Maps
 
 A ready-made Archon **map pack** is on HiveWorkshop: _link to be added_.
