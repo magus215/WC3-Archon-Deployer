@@ -75,56 +75,56 @@ def _split_module(src: str):
     return src[gi + len("globals"):ge], src[ge + len("endglobals"):]
 
 
+def _farthest_from_red(coords: dict, red_idx: int):
+    """Index of the start location farthest from red (Player 0's home). Anchoring on red and pushing
+    the opponent as far away as possible gives a correct cross-map matchup on ANY layout: on a 1v1
+    (2 locations) it's just the other corner (= original behavior); on a 2v2 the script's SL0/SL1 are
+    usually same-side allies, so this is what puts the enemy team across the map; and it's robust for
+    arbitrary custom maps people convert."""
+    rx, ry = float(coords[red_idx][0]), float(coords[red_idx][1])
+    return max((k for k in coords if k != red_idx),
+               key=lambda k: (float(coords[k][0]) - rx) ** 2 + (float(coords[k][1]) - ry) ** 2)
+
+
 def _archonify_config(map_j: str) -> str:
-    """Make config() a 4-player Archon lobby (P0+P2 / P1+P3), mirroring the working AutumnLeaves map.
-    Handles BOTH map sizes:
-      * 1v1 (2-player): P2/P3 are absent -> we add them at start-loc indices 2,3 placed on the
-        mains' coords.
-      * 2v2 (4-player, e.g. Lost Temple): P2/P3 already exist at their OWN real bases (SL2/SL3) with
-        melee-FFA forces -> if left alone the supports sit on real bases as enemy players (instant
-        defeat) and the W3I (already 4-player/2-force) contradicts the script. So we REDEFINE start-
-        loc indices 2,3 onto the MAINS' coords (supports mirror their mains; the real corners are
-        freed as neutral gold-mine expansions) and pin P2/P3 to them, matching w3i.archonify.
-    In both cases: bump SetPlayers/SetTeams->4, force USE_MAP_SETTINGS placement, and replace the
-    melee FFA slot setup with an explicit Archon 2-team assignment."""
-    # which player ids does InitCustomPlayerSlots already configure?
+    """Make config() a 4-player Archon lobby (P0+P2 vs P1+P3) with a correct opponent layout.
+
+    The two mains anchor on RED (Player 0)'s home; the opposing main goes to the start location
+    FARTHEST from red, each support co-located on its main, the freed corners left as neutral
+    gold-mine expansions. Also bumps SetPlayers/SetTeams->4, forces USE_MAP_SETTINGS placement,
+    replaces the melee-FFA slot setup with an explicit 2-team assignment, and (on a 1v1 map, where
+    P2/P3 don't exist yet) adds the support player slots."""
     pi = map_j.index("function InitCustomPlayerSlots")
     pend = map_j.index("endfunction", pi)
     slots = map_j[pi:pend]
     present = set(int(m) for m in re.findall(r"SetPlayerController\(\s*Player\((\d+)\)", slots))
-    four_player = (2 in present and 3 in present)      # a 2v2 map: P2/P3 already at their own bases
-    # which start-loc index does each main use, and where is it?
+    four_player = (2 in present and 3 in present)      # a 2v2 map: P2/P3 already exist
     locs = {int(p): int(l) for p, l in
             re.findall(r"SetPlayerStartLocation\(\s*Player\((\d+)\)\s*,\s*(\d+)\s*\)", slots)}
     coords = {int(i): (x, y) for i, x, y in
               re.findall(r"DefineStartLocation\(\s*(\d+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)", map_j)}
-    m0, m1 = locs.get(0, 0), locs.get(1, 1)            # P0/P1 start-loc indices
-    (x0, y0), (x1, y1) = coords[m0], coords[m1]
-    # 1) SetPlayers/SetTeams -> 4 (idempotent on a 2v2 map, where they are already 4)
+    red_idx = locs.get(0, 0)                            # red = Player 0's start location
+    opp_idx = _farthest_from_red(coords, red_idx)       # opposing team goes here
+    (cix, ciy), (cjx, cjy) = coords[red_idx], coords[opp_idx]
+    # 1) SetPlayers/SetTeams -> 4 (idempotent on a 2v2 map)
     map_j = re.sub(r"(call\s+SetPlayers\(\s*)(\d+)(\s*\))",
                    lambda m: m.group(1) + str(max(int(m.group(2)), 4)) + m.group(3), map_j, count=1)
     map_j = re.sub(r"(call\s+SetTeams\(\s*)(\d+)(\s*\))",
                    lambda m: m.group(1) + str(max(int(m.group(2)), 4)) + m.group(3), map_j, count=1)
-    # placement -> USE_MAP_SETTINGS: each player spawns at its ASSIGNED start location with no
-    # engine shuffle. The default TEAMS_TOGETHER randomizes the players across the locations and,
-    # because supports duplicate the mains' coords, can drop two enemy mains on one spot.
-    # (core.j AC_MeleePlaceMains then does a controlled team-corner coin-flip for fairness.)
+    # placement -> USE_MAP_SETTINGS (no engine shuffle; AC_MeleePlaceMains coin-flips the corners)
     map_j = re.sub(r"call\s+SetGamePlacement\(\s*MAP_PLACEMENT_\w+\s*\)",
                    "call SetGamePlacement( MAP_PLACEMENT_USE_MAP_SETTINGS )", map_j, count=1)
-    # 2) (re)define start locations 2 & 3 on the MAINS' coords, right before InitCustomPlayerSlots.
-    #    On a 2v2 map these run AFTER the map's own DefineStartLocation(2/3), so they OVERRIDE them
-    #    (last write wins): the supports mirror their mains and the real SL2/SL3 corners are vacated
-    #    (kept as neutral expansions with their gold mines intact, instead of being cleared).
+    # 2) point all four start-loc indices at the two chosen homes (red on 0,2 ; opponent on 1,3),
+    #    right before InitCustomPlayerSlots so this OVERRIDES the map's own DefineStartLocation.
     map_j = map_j.replace(
         "call InitCustomPlayerSlots(  )",
-        "call DefineStartLocation( 2, %s, %s )\n"
+        "call DefineStartLocation( 0, %s, %s )\n"
+        "    call DefineStartLocation( 1, %s, %s )\n"
+        "    call DefineStartLocation( 2, %s, %s )\n"
         "    call DefineStartLocation( 3, %s, %s )\n"
-        "    call InitCustomPlayerSlots(  )" % (x0, y0, x1, y1), 1)
-    # 3) open the support slots, and REPLACE InitGenericPlayerSlots (which dispatches to the melee
-    #    FFA slot setup -> one team per player) with explicit Archon 2-team assignment, mirroring
-    #    AutumnLeaves' InitCustomTeams. The Reforged lobby reads config()'s team setup, so this is
-    #    what collapses the lobby to 2 teams. (Alliance/shared-control is asserted in core.j
-    #    AC_FinalizeArchon.)
+        "    call InitCustomPlayerSlots(  )" % (cix, ciy, cjx, cjy, cix, ciy, cjx, cjy), 1)
+    # 3) replace the melee FFA slot setup with explicit Archon 2-team assignment (collapses the lobby
+    #    to 2 teams; alliance/shared-control is asserted in core.j AC_FinalizeArchon).
     team_setup = (
         "call SetPlayerSlotAvailable( Player(2), MAP_CONTROL_USER )\n"
         "    call SetPlayerSlotAvailable( Player(3), MAP_CONTROL_USER )\n"
@@ -138,24 +138,20 @@ def _archonify_config(map_j: str) -> str:
     else:
         map_j = map_j.replace("call InitAllyPriorities(  )",
                               team_setup + "\n    call InitAllyPriorities(  )", 1)
-    # 4) configure the supports inside InitCustomPlayerSlots
-    if four_player:
-        # P2/P3 already exist (at their own real bases) -> just pin them onto the mains' (redefined)
-        # start-loc indices 2,3 so they mirror their mains and vacate the real corners.
-        add = (
-            "\n    // Archon: pin supports onto the mains' start locations (indices 2,3 redefined above)\n"
-            "    call SetPlayerStartLocation( Player(2), 2 )\n"
-            "    call SetPlayerStartLocation( Player(3), 3 )\n")
-    else:
-        add = (
-            "\n    // Player 2 (Archon support, co-located with Player 0)\n"
-            "    call SetPlayerStartLocation( Player(2), 2 )\n"
+    # 4) canonical player->location: P0,P2 -> red (0,2); P1,P3 -> opponent (1,3). Overrides whatever
+    #    the map assigned; on a 1v1 map P2/P3 are new so add their color/race/controller too.
+    add = (
+        "\n    // Archon placement: P0+P2 at red's home (0,2), P1+P3 at the farthest corner (1,3)\n"
+        "    call SetPlayerStartLocation( Player(0), 0 )\n"
+        "    call SetPlayerStartLocation( Player(1), 1 )\n"
+        "    call SetPlayerStartLocation( Player(2), 2 )\n"
+        "    call SetPlayerStartLocation( Player(3), 3 )\n")
+    if not four_player:
+        add += (
             "    call SetPlayerColor( Player(2), ConvertPlayerColor(2) )\n"
             "    call SetPlayerRacePreference( Player(2), RACE_PREF_RANDOM )\n"
             "    call SetPlayerRaceSelectable( Player(2), true )\n"
             "    call SetPlayerController( Player(2), MAP_CONTROL_USER )\n"
-            "\n    // Player 3 (Archon support, co-located with Player 1)\n"
-            "    call SetPlayerStartLocation( Player(3), 3 )\n"
             "    call SetPlayerColor( Player(3), ConvertPlayerColor(3) )\n"
             "    call SetPlayerRacePreference( Player(3), RACE_PREF_RANDOM )\n"
             "    call SetPlayerRaceSelectable( Player(3), true )\n"
@@ -218,19 +214,20 @@ def _lua_func_end(src: str, start: int) -> int:
 
 
 def _archonify_config_lua(map_lua: str) -> str:
-    """Lua twin of _archonify_config: make config() a 4-player Archon lobby, for BOTH 1v1 maps
-    (P2/P3 absent -> added) and 2v2 maps (P2/P3 already at their own bases -> redefined onto the
-    mains so the supports mirror their mains and the real corners stay as gold-mine expansions)."""
+    """Lua twin of _archonify_config: mains anchor on RED (Player 0)'s home, the opposing main goes
+    to the start location FARTHEST from red, supports co-located. 1v1 (2 locations) is unchanged;
+    2v2 gets a proper cross-map matchup; robust for custom maps."""
     pi = map_lua.index("function InitCustomPlayerSlots")
     slots = map_lua[pi:_lua_func_end(map_lua, pi)]
     present = set(int(m) for m in re.findall(r"SetPlayerController\(\s*Player\((\d+)\)", slots))
-    four_player = (2 in present and 3 in present)      # a 2v2 map: P2/P3 already at their own bases
+    four_player = (2 in present and 3 in present)      # a 2v2 map: P2/P3 already exist
     locs = {int(p): int(l) for p, l in
             re.findall(r"SetPlayerStartLocation\(\s*Player\((\d+)\)\s*,\s*(\d+)\s*\)", slots)}
     coords = {int(i): (x, y) for i, x, y in
               re.findall(r"DefineStartLocation\(\s*(\d+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)", map_lua)}
-    m0, m1 = locs.get(0, 0), locs.get(1, 1)
-    (x0, y0), (x1, y1) = coords[m0], coords[m1]
+    red_idx = locs.get(0, 0)                            # red = Player 0's start location
+    opp_idx = _farthest_from_red(coords, red_idx)       # opposing team goes here
+    (cix, ciy), (cjx, cjy) = coords[red_idx], coords[opp_idx]
     # SetPlayers/SetTeams -> 4 (idempotent on a 2v2 map) ; placement -> USE_MAP_SETTINGS
     map_lua = re.sub(r"(SetPlayers\(\s*)(\d+)(\s*\))",
                      lambda m: m.group(1) + str(max(int(m.group(2)), 4)) + m.group(3), map_lua, count=1)
@@ -238,11 +235,12 @@ def _archonify_config_lua(map_lua: str) -> str:
                      lambda m: m.group(1) + str(max(int(m.group(2)), 4)) + m.group(3), map_lua, count=1)
     map_lua = re.sub(r"SetGamePlacement\(\s*MAP_PLACEMENT_\w+\s*\)",
                      "SetGamePlacement(MAP_PLACEMENT_USE_MAP_SETTINGS)", map_lua, count=1)
-    # (re)define start locs 2&3 on the mains' coords before the InitCustomPlayerSlots() CALL (not its
-    # def). On a 2v2 map these run after the map's own DefineStartLocation(2/3) -> override them.
+    # point all four start-loc indices at the two chosen homes (red on 0,2 ; opponent on 1,3) before
+    # the InitCustomPlayerSlots() CALL (lookbehind skips the def) -> overrides the map's own defs.
     map_lua = re.sub(r"(?<!function )InitCustomPlayerSlots\(\s*\)",
+                     "DefineStartLocation(0, %s, %s)\nDefineStartLocation(1, %s, %s)\n"
                      "DefineStartLocation(2, %s, %s)\nDefineStartLocation(3, %s, %s)\nInitCustomPlayerSlots()"
-                     % (x0, y0, x1, y1), map_lua, count=1)
+                     % (cix, ciy, cjx, cjy, cix, ciy, cjx, cjy), map_lua, count=1)
     # explicit Archon 2-team setup, replacing the FFA InitGenericPlayerSlots()
     team_setup = (
         "SetPlayerSlotAvailable(Player(2), MAP_CONTROL_USER)\n"
@@ -256,20 +254,18 @@ def _archonify_config_lua(map_lua: str) -> str:
         map_lua = map_lua.replace("InitGenericPlayerSlots()", team_setup, 1)
     else:
         map_lua = map_lua.replace("InitAllyPriorities()", team_setup + "\nInitAllyPriorities()", 1)
-    # configure the supports inside InitCustomPlayerSlots
-    if four_player:
-        # P2/P3 already exist -> just pin them onto the mains' (redefined) start-loc indices 2,3.
-        add = (
-            "SetPlayerStartLocation(Player(2), 2)\n"
-            "SetPlayerStartLocation(Player(3), 3)\n")
-    else:
-        add = (
-            "SetPlayerStartLocation(Player(2), 2)\n"
+    # canonical player->location: P0,P2 -> red (0,2); P1,P3 -> opponent (1,3). On a 1v1 map P2/P3 are
+    # new so add their color/race/controller too.
+    add = ("SetPlayerStartLocation(Player(0), 0)\n"
+           "SetPlayerStartLocation(Player(1), 1)\n"
+           "SetPlayerStartLocation(Player(2), 2)\n"
+           "SetPlayerStartLocation(Player(3), 3)\n")
+    if not four_player:
+        add += (
             "SetPlayerColor(Player(2), ConvertPlayerColor(2))\n"
             "SetPlayerRacePreference(Player(2), RACE_PREF_RANDOM)\n"
             "SetPlayerRaceSelectable(Player(2), true)\n"
             "SetPlayerController(Player(2), MAP_CONTROL_USER)\n"
-            "SetPlayerStartLocation(Player(3), 3)\n"
             "SetPlayerColor(Player(3), ConvertPlayerColor(3))\n"
             "SetPlayerRacePreference(Player(3), RACE_PREF_RANDOM)\n"
             "SetPlayerRaceSelectable(Player(3), true)\n"

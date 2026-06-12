@@ -117,13 +117,18 @@ def archonify(w3i: bytes) -> bytes:
     header, players, trailing = _read_block(w3i, off)
     if len(players) < 2:
         raise ValueError("source map has fewer than 2 players; not a standard melee map")
-    p0, p1 = players[0], players[1]
+    # main 0 = red (Player 0); main 1 = the player whose start is FARTHEST from red. This mirrors the
+    # script's red-anchored placement so the lobby preview matches the in-game spawns. On a 1v1 (2
+    # players) "farthest" is just the other player = unchanged.
+    red = next((p for p in players if p[0] == 0), players[0])
+    others = [p for p in players if p is not red] or [red]
+    mb = max(others, key=lambda p: (p[2] - red[2]) ** 2 + (p[3] - red[3]) ** 2)
 
     new_players = struct.pack("<i", 4)
-    new_players += _ser_player(0, p0[1], p0[2], p0[3])      # main 0 (keep name+start)
-    new_players += _ser_player(1, p1[1], p1[2], p1[3])      # main 1
-    new_players += _ser_player(2, "", p0[2], p0[3])         # support 0 -> shares main 0's start
-    new_players += _ser_player(3, "", p1[2], p1[3])         # support 1 -> shares main 1's start
+    new_players += _ser_player(0, red[1], red[2], red[3])   # main 0 = red (keep name+start)
+    new_players += _ser_player(1, mb[1], mb[2], mb[3])      # main 1 = farthest from red
+    new_players += _ser_player(2, "", red[2], red[3])       # support 0 -> shares red's start
+    new_players += _ser_player(3, "", mb[2], mb[3])         # support 1 -> shares main 1's start
 
     new_forces = struct.pack("<i", 2)
     new_forces += _ser_force(FORCE_FLAGS, TEAM0_MASK, "Team 1")
