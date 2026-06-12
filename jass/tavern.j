@@ -36,6 +36,13 @@ globals
     trigger AT_reviveStart = null
     trigger AT_reviveFinish = null
     trigger AT_reviveCancel = null
+    trigger AT_altarOrder = null
+    // currently-reserved heroes (dummy pulled from the tavern while being altar-revived). A flat
+    // list so we can track SEVERAL heroes queued at the same altar without confusing them. The
+    // per-hero altar is in hashtable key 9 (hero -> altar); there is no single altar->hero map
+    // (that would lose heroes when more than one is queued at the same altar).
+    unit array AT_resv
+    integer AT_resvN = 0
 endglobals
 
 // hashtable parent keys (namespaces)
@@ -210,8 +217,15 @@ function AT_MakeReviveDummy takes integer team, unit deadHero returns nothing
         return // not a roster hero (no revive dummy mapped)
     endif
     set dummyType = LoadInteger(AT_ht, 1, rt)
-    set rd = CreateUnit(AT_Support(team), dummyType, AT_x[team], AT_y[team], 0.0)
-    call SetHeroLevel(rd, GetHeroLevel(deadHero), false) // mirror level -> native revive cost
+    // Match the dead hero's level by copying its XP, NOT via SetHeroLevel: in-game, calling
+    // SetHeroLevel with the level the dummy already has glitches it UP by one (a level-1 dummy set to
+    // level 1 became level 2). The dummy is born at level 1 / 0 XP, so copying the dead hero's XP only
+    // ever RAISES it to the exact matching level (+ progress) -- no same-level glitch. Created under
+    // NEUTRAL_PASSIVE (clean level 1) then handed to the support for its tavern.
+    set rd = CreateUnit(Player(PLAYER_NEUTRAL_PASSIVE), dummyType, AT_x[team], AT_y[team], 0.0)
+    call SetHeroXP(rd, GetHeroXP(deadHero), false)         // level follows the copied XP exactly
+    call BlzSetHeroProperName(rd, GetHeroProperName(deadHero))
+    call SetUnitOwner(rd, AT_Support(team), false)         // hand it to the support so it's revivable in their tavern
     call KillUnit(rd) // inherits the real hero's death timer -> greys then unlocks in the
                       // support's tavern in sync with when the main could revive
     // map both directions so we can find/clean up later
@@ -233,31 +247,95 @@ function AT_RemoveReviveDummyFor takes unit deadHero returns nothing
     endif
 endfunction
 
-//---- reserve: flip the ReviveDummy's owner so it leaves/returns to the support's tavern,
-//---- WITHOUT destroying it (no death-timer reset). Mirrors the 1v1 "a hero being revived at
-//---- the altar isn't available at the tavern" reservation, so the support can't tavern-revive
-//---- a hero the main has queued at an altar (preserving the cancel-then-tavern micro).
-function AT_ReserveReviveDummy takes unit hero returns nothing
+//---- reserved-hero list helpers (flat, small: at most a few dead heroes per team at once) -------
+function AT_ResvIndexOf takes unit h returns integer
+    local integer i = 0
+    loop
+        exitwhen i >= AT_resvN
+        if AT_resv[i] == h then
+            return i
+        endif
+        set i = i + 1
+    endloop
+    return -1
+endfunction
+
+function AT_ResvAdd takes unit h returns nothing
+    if AT_ResvIndexOf(h) < 0 then
+        set AT_resv[AT_resvN] = h
+        set AT_resvN = AT_resvN + 1
+    endif
+endfunction
+
+function AT_ResvRemove takes unit h returns nothing
+    local integer i = AT_ResvIndexOf(h)
+    if i >= 0 then
+        set AT_resv[i] = AT_resv[AT_resvN - 1]   // compact: move the last entry into the gap
+        set AT_resv[AT_resvN - 1] = null
+        set AT_resvN = AT_resvN - 1
+    endif
+endfunction
+
+//---- reserve / unreserve: while the main altar-revives a hero, the support must NOT also be able
+//---- to tavern-revive it (mirrors 1v1: a hero being revived at the altar isn't available
+//---- elsewhere). We flip the ReviveDummy's OWNER to neutral (pulls it out of the support's tavern)
+//---- and back to the support on cancel / altar-death. Owner-flip (not remove+recreate) PRESERVES
+//---- the dummy's running death timer. We also record the hero's altar (key 9) and add it to the
+//---- reserved list, so that with SEVERAL heroes queued at one altar each is tracked independently
+//---- and a cancel can never flip back the wrong one.
+function AT_ReserveReviveDummy takes unit hero, unit altar returns nothing
     local unit rd
     if HaveSavedHandle(AT_ht, 6, GetHandleId(hero)) then
         set rd = LoadUnitHandle(AT_ht, 6, GetHandleId(hero))
         if rd != null then
             call SetUnitOwner(rd, Player(PLAYER_NEUTRAL_PASSIVE), false)
+            if altar != null then
+                call SaveUnitHandle(AT_ht, 9, GetHandleId(hero), altar)   // hero -> its altar
+            endif
+            call AT_ResvAdd(hero)
         endif
         set rd = null
     endif
 endfunction
 
 function AT_UnreserveReviveDummy takes unit hero returns nothing
-    local integer team = AT_TeamOf(GetOwningPlayer(hero))
+    local integer team
     local unit rd
+    if hero == null then
+        return
+    endif
+    set team = AT_TeamOf(GetOwningPlayer(hero))
     if team >= 0 and HaveSavedHandle(AT_ht, 6, GetHandleId(hero)) then
         set rd = LoadUnitHandle(AT_ht, 6, GetHandleId(hero))
         if rd != null then
-            call SetUnitOwner(rd, AT_Support(team), false)
+            call SetUnitOwner(rd, AT_Support(team), false)   // back into the support's tavern, timer intact
         endif
         set rd = null
     endif
+    call RemoveSavedHandle(AT_ht, 9, GetHandleId(hero))
+    call AT_ResvRemove(hero)
+endfunction
+
+// Un-reserve EVERY hero currently being revived at a given altar (used when that altar dies). Re-scans
+// from the start each pass because AT_UnreserveReviveDummy compacts the list as it removes entries.
+function AT_UnreserveAllAtAltar takes unit altar returns nothing
+    local integer i
+    local unit cand
+    loop
+        set i = 0
+        set cand = null
+        loop
+            exitwhen i >= AT_resvN
+            if AT_resv[i] != null and HaveSavedHandle(AT_ht, 9, GetHandleId(AT_resv[i])) and LoadUnitHandle(AT_ht, 9, GetHandleId(AT_resv[i])) == altar then
+                set cand = AT_resv[i]
+                exitwhen true
+            endif
+            set i = i + 1
+        endloop
+        exitwhen cand == null
+        call AT_UnreserveReviveDummy(cand)
+    endloop
+    set cand = null
 endfunction
 
 //==== CONFIRM these two against your GUI "begins reviving a unit" event ====================
@@ -365,19 +443,13 @@ endfunction
 function AT_OnDeath takes nothing returns nothing
     local unit u = GetTriggerUnit()
     local integer team = AT_TeamOf(GetOwningPlayer(u))
-    local unit h
     if team < 0 then
         set u = null
         return
     endif
-    // Altar that was mid-revive just died (no native cancel event fires) -> un-reserve its hero.
-    if HaveSavedHandle(AT_ht, 8, GetHandleId(u)) then
-        set h = LoadUnitHandle(AT_ht, 8, GetHandleId(u))
-        call RemoveSavedHandle(AT_ht, 9, GetHandleId(h))
-        call RemoveSavedHandle(AT_ht, 8, GetHandleId(u))
-        call AT_UnreserveReviveDummy(h)
-        set h = null
-    endif
+    // An altar that was mid-revive just died (no native cancel event fires) -> un-reserve EVERY hero
+    // queued at it so their dummies return to the support's tavern.
+    call AT_UnreserveAllAtAltar(u)
     if IsUnitType(u, UNIT_TYPE_HERO) and AT_IsMainPlayer(GetOwningPlayer(u)) then
         // Spawn the ReviveDummy on death; it inherits the real hero's death timer, so it
         // greys-then-unlocks in the tavern in sync (confirmed in-editor). The ReviveDummy then
@@ -402,30 +474,60 @@ function AT_OnReviveStart takes nothing returns nothing
     local unit hero = AT_RevivedHero()
     local unit altar = AT_RevivingAltar()
     if AT_TeamOf(GetOwningPlayer(hero)) >= 0 and AT_IsMainPlayer(GetOwningPlayer(hero)) then
-        call AT_ReserveReviveDummy(hero)               // pull it from the support's tavern
-        if altar != null then                          // track for the altar-death edge
-            call SaveUnitHandle(AT_ht, 8, GetHandleId(altar), hero)
-            call SaveUnitHandle(AT_ht, 9, GetHandleId(hero), altar)
-        endif
+        call AT_ReserveReviveDummy(hero, altar)        // pull from tavern + record hero->altar + list
     endif
     set hero = null
     set altar = null
 endfunction
 
 //------------------------------------------------ altar revive CANCELLED -> un-reserve
+// The event names the exact hero being cancelled (precise even with several queued at one altar),
+// so find it via key 6 from whichever handle the event provides and flip it back. No type check (an
+// altar revives only heroes); GetRevivingUnit() can be null on cancel, hence checking both handles.
 function AT_OnReviveCancel takes nothing returns nothing
-    local unit hero = AT_RevivedHero()
-    local unit altar
-    if HaveSavedHandle(AT_ht, 9, GetHandleId(hero)) then
-        set altar = LoadUnitHandle(AT_ht, 9, GetHandleId(hero))
-        if altar != null then
-            call RemoveSavedHandle(AT_ht, 8, GetHandleId(altar))
-        endif
-        call RemoveSavedHandle(AT_ht, 9, GetHandleId(hero))
+    local unit a = GetTriggerUnit()
+    local unit b = GetRevivingUnit()
+    if a != null and HaveSavedHandle(AT_ht, 6, GetHandleId(a)) then
+        call AT_UnreserveReviveDummy(a)
+    elseif b != null and HaveSavedHandle(AT_ht, 6, GetHandleId(b)) then
+        call AT_UnreserveReviveDummy(b)
     endif
-    call AT_UnreserveReviveDummy(hero)                 // hero still dead -> back to the tavern
+    set a = null
+    set b = null
+endfunction
+
+//------------------------------------------------ altar revive CANCELLED via the QUEUE (reliable
+// backup for the flaky HERO_REVIVE_CANCEL event). Cancelling a queued altar revive issues the
+// "cancel" order (851976 -- the same order we use to cancel the dummy-count training) to the altar.
+// Order events are reliable, so when 851976 hits an altar that has a reserved hero queued on it
+// (captured at revive-START while in progress, key 9), flip that hero's dummy back to the tavern.
+function AT_OnAltarCancelOrder takes nothing returns nothing
+    local unit altar = GetTriggerUnit()
+    local integer i
+    local integer found
+    local unit hero
+    if GetIssuedOrderId() != 851976 then
+        return
+    endif
+    // Count the reserved heroes being revived at THIS altar. Only flip back if there is EXACTLY ONE
+    // (unambiguous): the order event can't say which queue slot was cancelled, so when several are
+    // queued at one altar we leave it to the named HERO_REVIVE_CANCEL event -> we never guess wrong.
+    set found = 0
     set hero = null
+    set i = 0
+    loop
+        exitwhen i >= AT_resvN
+        if AT_resv[i] != null and HaveSavedHandle(AT_ht, 9, GetHandleId(AT_resv[i])) and LoadUnitHandle(AT_ht, 9, GetHandleId(AT_resv[i])) == altar then
+            set found = found + 1
+            set hero = AT_resv[i]
+        endif
+        set i = i + 1
+    endloop
+    if found == 1 then
+        call AT_UnreserveReviveDummy(hero)   // hero still dead -> dummy back in the support's tavern
+    endif
     set altar = null
+    set hero = null
 endfunction
 
 //------------------------------------------------ a hero REVIVES (completes)
@@ -433,29 +535,28 @@ function AT_OnReviveFinish takes nothing returns nothing
     local unit u = AT_RevivedHero()
     local integer team = AT_TeamOf(GetOwningPlayer(u))
     local unit dead
-    local unit altar
     if team >= 0 and HaveSavedHandle(AT_ht, 7, GetHandleId(u)) then
         // u is a ReviveDummy the support revived at the tavern -> redirect to the real hero.
         set dead = LoadUnitHandle(AT_ht, 7, GetHandleId(u))
         if dead != null then
             call ReviveHero(dead, GetUnitX(u), GetUnitY(u), true)
+            // ReviveHero brings the hero back at full (altar) values; a TAVERN revive is weaker, so
+            // override to the tavern values: 50% HP, 0% mana.
+            call SetUnitState(dead, UNIT_STATE_LIFE, GetUnitState(dead, UNIT_STATE_MAX_LIFE) * 0.50)
+            call SetUnitState(dead, UNIT_STATE_MANA, 0.0)
+            call AT_ResvRemove(dead)                            // (safety) it shouldn't be reserved here
+            call RemoveSavedHandle(AT_ht, 9, GetHandleId(dead))
             call AT_RemoveReviveDummyFor(dead)
         endif
         call RemoveUnit(u) // remove the (briefly alive, model-less) ReviveDummy
     else
-        // a real main hero finished reviving at its altar -> drop tracking + its ReviveDummy
-        if HaveSavedHandle(AT_ht, 9, GetHandleId(u)) then
-            set altar = LoadUnitHandle(AT_ht, 9, GetHandleId(u))
-            if altar != null then
-                call RemoveSavedHandle(AT_ht, 8, GetHandleId(altar))
-            endif
-            call RemoveSavedHandle(AT_ht, 9, GetHandleId(u))
-        endif
+        // a real main hero finished reviving at its altar -> drop its tracking + (reserved) dummy
+        call AT_ResvRemove(u)
+        call RemoveSavedHandle(AT_ht, 9, GetHandleId(u))
         call AT_RemoveReviveDummyFor(u)
     endif
     set u = null
     set dead = null
-    set altar = null
 endfunction
 
 //============================================================== INIT
@@ -540,6 +641,7 @@ function ArchonTavern_Init takes nothing returns nothing
     set AT_reviveStart = CreateTrigger()
     set AT_reviveFinish = CreateTrigger()
     set AT_reviveCancel = CreateTrigger()
+    set AT_altarOrder = CreateTrigger()
     // (AI-support removal lives in core.j / ArchonCore_Init)
     call AT_InitRoster()
     loop
@@ -572,4 +674,7 @@ function ArchonTavern_Init takes nothing returns nothing
     call TriggerAddAction(AT_reviveFinish, function AT_OnReviveFinish)
     call TriggerRegisterAnyUnitEventBJ(AT_reviveCancel, EVENT_PLAYER_HERO_REVIVE_CANCEL)
     call TriggerAddAction(AT_reviveCancel, function AT_OnReviveCancel)
+    // reliable backup for the flaky cancel event: the "cancel" order (851976) on a revive-altar
+    call TriggerRegisterAnyUnitEventBJ(AT_altarOrder, EVENT_PLAYER_UNIT_ISSUED_ORDER)
+    call TriggerAddAction(AT_altarOrder, function AT_OnAltarCancelOrder)
 endfunction
