@@ -69,7 +69,7 @@ What can make a modified map incompatible:
 
 ## Maps
 
-A ready-made Archon **map pack** is on HiveWorkshop: _link to be added_.
+A ready-made Archon **map pack** is on HiveWorkshop: [Archon Mode Map Pack](https://www.hiveworkshop.com/threads/archon-mode-map-pack-for-warcraft-3-1v1-melee.372760/).
 This repository ships **only the deployer** — point it at any vanilla melee map and convert it yourself.
 
 ## Licensing
